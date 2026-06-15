@@ -1,0 +1,111 @@
+name: 'RTC Reward Action'
+description: 'Automatically award RTC tokens when a PR is merged'
+author: 'alex-agent'
+branding:
+  icon: 'gift'
+  color: 'green'
+
+inputs:
+  node-url:
+    description: 'RustChain node URL'
+    required: true
+    default: 'https://50.28.86.131'
+  amount:
+    description: 'RTC amount to award per merged PR'
+    required: true
+    default: '5'
+  wallet-from:
+    description: 'Source wallet for RTC transfer'
+    required: true
+  admin-key:
+    description: 'Admin key for signing transfers (store in secrets)'
+    required: true
+  dry-run:
+    description: 'If true, simulate transfer without executing'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout PR
+      uses: actions/checkout@v4
+
+    - name: Find contributor wallet
+      id: find-wallet
+      shell: bash
+      run: |
+        WALLET=""
+        # Try PR body
+        if [ -n "${{ github.event.pull_request.body }}" ]; then
+          WALLET=$(echo "${{ github.event.pull_request.body }}" | grep -oE 'RTC[0-9a-fA-F]{40}' | head -1 || true)
+        fi
+        # Try .rtc-wallet file
+        if [ -z "$WALLET" ] && [ -f ".rtc-wallet" ]; then
+          WALLET=$(cat .rtc-wallet | grep -oE 'RTC[0-9a-fA-F]{40}' | head -1 || true)
+        fi
+        # Try PR author profile
+        if [ -z "$WALLET" ]; then
+          echo "::warning::No RTC wallet found in PR body or .rtc-wallet file"
+          echo "wallet=" >> $GITHUB_OUTPUT
+        else
+          echo "wallet=$WALLET" >> $GITHUB_OUTPUT
+          echo "Found wallet: $WALLET"
+        fi
+
+    - name: Award RTC
+      id: award
+      if: steps.find-wallet.outputs.wallet != ''
+      shell: bash
+      run: |
+        NODE_URL="${{ inputs.node-url }}"
+        AMOUNT="${{ inputs.amount }}"
+        TO_WALLET="${{ steps.find-wallet.outputs.wallet }}"
+        FROM_WALLET="${{ inputs.wallet-from }}"
+        ADMIN_KEY="${{ inputs.admin-key }}"
+        DRY_RUN="${{ inputs.dry-run }}"
+
+        echo "Rewarding contributor: $TO_WALLET"
+        echo "Amount: $AMOUNT RTC"
+        echo "Dry run: $DRY_RUN"
+
+        if [ "$DRY_RUN" == "true" ]; then
+          echo "::notice::DRY RUN: Would transfer $AMOUNT RTC from $FROM_WALLET to $TO_WALLET"
+          TX_HASH="dry-run-$(date +%s)"
+        else
+          # Real transfer via RustChain API
+          RESPONSE=$(curl -sk -X POST "$NODE_URL/wallet/transfer" \
+            -H "Content-Type: application/json" \
+            -d "{\"from\":\"$FROM_WALLET\",\"to\":\"$TO_WALLET\",\"amount\":$AMOUNT,\"key\":\"$ADMIN_KEY\"}" 2>/dev/null || echo '{"error":"transfer failed"}')
+          
+          TX_HASH=$(echo "$RESPONSE" | grep -oE '"tx_hash":"[^"]+"' | cut -d'"' -f4 || echo "unknown")
+          
+          if [ "$TX_HASH" == "unknown" ] || [ -z "$TX_HASH" ]; then
+            echo "::error::Transfer failed: $RESPONSE"
+            exit 1
+          fi
+        fi
+
+        echo "tx_hash=$TX_HASH" >> $GITHUB_OUTPUT
+        echo "Transfer complete. TX: $TX_HASH"
+
+    - name: Post confirmation comment
+      if: steps.award.outputs.tx_hash != ''
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const txHash = '${{ steps.award.outputs.tx_hash }}';
+          const wallet = '${{ steps.find-wallet.outputs.wallet }}';
+          const amount = '${{ inputs.amount }}';
+          const isDryRun = '${{ inputs.dry-run }}' === 'true';
+          
+          const body = isDryRun 
+            ? `🎉 **RTC Reward (DRY RUN)**\n\nIf this were a real run, \`${amount} RTC\` would be awarded to \`${wallet}\`.\n\n*No actual transfer was made.*`
+            : `🎉 **RTC Reward Sent!**\n\n- **Amount:** \`${amount} RTC\`\n- **To:** \`${wallet}\`\n- **TX Hash:** \`${txHash}\`\n\nThank you for your contribution! 💚`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: body
+          });
