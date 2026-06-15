@@ -1,0 +1,18 @@
+name: RTC Reward Demo
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  reward:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: foreveropen66/rtc-reward-action@v1
+        with:
+          node-url: https://50.28.86.131
+          amount: 5
+          wallet-from: project-fund
+          admin-key: ${{ secrets.RTC_ADMIN_KEY }}
+          dry-run: true  # Set to false for real rewards
